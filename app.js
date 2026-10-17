@@ -19,6 +19,12 @@ const CONFIG = {
   maxEnrich: 12,          // max correction records to fetch titles for
   sweepRows: 25,          // candidates pulled for the title sweep
   sweepThreshold: 0.55,   // fraction of the original title's tokens that must match
+  // Citation-flag scan: quoted phrases searched (title+abstract+fulltext where
+  // indexed) across papers that CITE the target. Results are gated on the phrase
+  // actually appearing in the citing paper's title or abstract.
+  flagPhrases: ['sign error', 'mistake in', 'contains an error'],
+  noticeTitleFilter: 'correction|erratum|corrigendum|retraction|expression of concern',
+  maxFlagged: 6,
 };
 
 const el = {
@@ -30,6 +36,7 @@ const el = {
 };
 
 let currentDoi = null; // guards hashchange-driven re-runs of the same lookup
+let lookupSeq = 0;     // only the most recently started lookup may render
 
 /* ---------------- helpers ---------------- */
 
@@ -199,14 +206,113 @@ async function titleSweep(doi, title, excludeDois) {
   });
 }
 
-async function openAlexCheck(doi) {
+/* ---------------- citation-flag scan ---------------- */
+
+function abstractFromInverted(idx) {
+  if (!idx) return '';
+  const out = [];
+  for (const [word, positions] of Object.entries(idx)) {
+    for (const p of positions) out[p] = word;
+  }
+  return out.join(' ');
+}
+
+// Sentence around the first occurrence of `phrase`, bounded to ~2 sentences.
+function snippetAround(text, phrase, span = 130) {
+  const t = String(text).replace(/\s+/g, ' ');
+  const i = t.toLowerCase().indexOf(phrase.toLowerCase());
+  if (i === -1) return '';
+  let s = Math.max(0, i - span);
+  let e = Math.min(t.length, i + phrase.length + span);
+  const ls = t.lastIndexOf('. ', s);
+  if (ls > 0) s = ls + 2;
+  const le = t.indexOf('. ', e);
+  if (le !== -1 && le - e < span) e = le + 1;
+  return (s > 0 ? '… ' : '') + t.slice(s, e).trim() + (e < t.length ? ' …' : '');
+}
+
+function flagVenue(w) {
+  return (w.primary_location && w.primary_location.source && w.primary_location.source.display_name) || '';
+}
+
+function stripOaDoi(u) { return (u.doi || '').replace('https://doi.org/', ''); }
+
+// Papers citing the target that use error language or carry notice-style titles.
+// This is the channel that catches "shown wrong in a later paper" cases which
+// never exist as formal errata (e.g. Moody–Wilczek 1984 ← Daido–Takahashi 2017).
+async function citationFlagScan(doi, excludeDois) {
   const d = await getJson(oaUrl('/works', {
-    filter: `doi:${doi}`, select: 'doi,is_retracted,display_name',
+    filter: `doi:${doi}`, select: 'id,doi,is_retracted,display_name,cited_by_count',
   }));
   const w = (d.results || [])[0];
-  if (!w) return null;
-  const flagged = w.is_retracted === true || /^retracted:/i.test(w.display_name || '');
-  return flagged ? w : null;
+  const retracted = w && (w.is_retracted === true || /^retracted:/i.test(w.display_name || ''));
+  if (!w || !w.cited_by_count) return { retracted, strong: [], weak: [], more: 0 };
+
+  const wid = w.id.split('/').pop();
+
+  const phraseJobs = CONFIG.flagPhrases.map(p =>
+    getJson(oaUrl('/works', {
+      filter: `cites:${wid}`, search: `"${p}"`, 'per-page': 10,
+      select: 'id,doi,display_name,publication_year,primary_location,abstract_inverted_index',
+    })).then(r => (r.results || []).map(x => ({ ...x, phrase: p })))
+  );
+
+  // Notice-titled citers are cross-checked in Crossref: an "Erratum: X" paper
+  // inherits X's reference list, so it can cite our target while correcting a
+  // different paper. Only keep it if it corrects the target or corrects nothing
+  // specific (unlinked notice).
+  const noticeChecks = async notices =>
+    Promise.all(notices.slice(0, 5).map(async n => {
+      // "Corrections to Newton's law" is physics content, not a notice: require
+      // the title to lead with the notice word itself.
+      if (!UPDATE_LEAD_RE.test(n.display_name || '')) return null;
+      const ndoi = stripOaDoi(n).toLowerCase();
+      let keep = true;
+      let reason = 'notice-titled paper citing this one';
+      if (ndoi) {
+        try {
+          const rec = await crossrefWork(ndoi);
+          const target = (rec['update-to'] || [])[0];
+          if (target && String(target.DOI).toLowerCase() !== doi) keep = false;
+          if (target && keep) reason = 'publisher notice for this paper';
+        } catch { /* record unavailable; keep default reason */ }
+      }
+      return keep ? {
+        DOI: ndoi, title: n.display_name, venue: flagVenue(n),
+        year: n.publication_year, reason, snippet: '',
+      } : null;
+    }));
+
+  const [phraseSets, notices] = await Promise.all([
+    Promise.allSettled(phraseJobs),
+    getJson(oaUrl('/works', {
+      filter: `cites:${wid},title.search:${CONFIG.noticeTitleFilter}`, 'per-page': 10,
+      select: 'id,doi,display_name,publication_year,primary_location',
+    })).then(r => r.results || []).catch(() => []),
+  ]);
+
+  const seen = new Set(notices.map(n => n.id));
+  const weak = [];
+  for (const set of phraseSets) {
+    if (set.status !== 'fulfilled') continue;
+    for (const r of set.value) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      const rdoi = stripOaDoi(r).toLowerCase();
+      if (!rdoi || rdoi === doi || excludeDois.has(rdoi)) continue;
+      // Gate: the phrase must appear in title or abstract, not just full text.
+      const abstract = abstractFromInverted(r.abstract_inverted_index);
+      if (!abstract.toLowerCase().includes(r.phrase) &&
+          !(r.display_name || '').toLowerCase().includes(r.phrase)) continue;
+      weak.push({
+        DOI: rdoi, title: r.display_name, venue: flagVenue(r),
+        year: r.publication_year, reason: `mentions “${r.phrase}”`,
+        snippet: snippetAround(abstract, r.phrase),
+      });
+    }
+  }
+  const strong = (await noticeChecks(notices)).filter(Boolean);
+  return { retracted, strong, weak, more: Math.max(0, weak.length - CONFIG.maxFlagged) };
 }
 
 /* ---------------- rendering ---------------- */
@@ -259,7 +365,27 @@ function renderUpdateCard(u, verified) {
   </article>`;
 }
 
-function renderAnalysis({ work, doi, linked, possible, retracted, updatesOf, sources }) {
+function renderFlagCard(f) {
+  const isNotice = /^notice|publisher/.test(f.reason);
+  const { label, cls } = isNotice
+    ? badgeFor(f.title)
+    : { label: 'citing paper', cls: 'badge badge-muted' };
+  const meta = [f.venue, f.year].filter(Boolean).join(' · ');
+  const heading = f.DOI
+    ? `<a href="${esc(doiHref(f.DOI))}" rel="noopener" target="_blank">${esc(f.title || f.DOI)}</a>`
+    : esc(f.title || 'Untitled record');
+  return `<article class="update-card">
+    <div class="update-head">
+      <span class="${cls}">${esc(label)}</span>
+      <span class="update-date">${esc(f.reason)}</span>
+    </div>
+    <h3>${heading}</h3>
+    <p class="update-meta">${esc(meta)}${meta && f.DOI ? ' · ' : ''}${f.DOI ? `<code>${esc(f.DOI)}</code>` : ''}</p>
+    ${f.snippet ? `<blockquote class="snippet">${esc(f.snippet)}</blockquote>` : ''}
+  </article>`;
+}
+
+function renderAnalysis({ work, doi, linked, possible, flags, retracted, updatesOf, sources }) {
   const title = titleOf(work) || '(untitled record)';
   const meta = [
     authorsShort(work.author),
@@ -311,14 +437,34 @@ function renderAnalysis({ work, doi, linked, possible, retracted, updatesOf, sou
       }, false)).join('')}</div>`;
   }
 
-  if (!linked.length && !possible.length) {
+  const shownDois = new Set(
+    [...linked, ...possible].map(u => String(u.DOI || '').toLowerCase())
+  );
+  const strong = (flags.strong || []).filter(f => !f.DOI || !shownDois.has(f.DOI));
+  const weak = (flags.weak || []).filter(f => !f.DOI || !shownDois.has(f.DOI));
+  const more = (flags.more || 0) + Math.max(0, (flags.weak || []).length - weak.length);
+
+  if (strong.length || weak.length) {
+    const total = strong.length + weak.length;
+    const cards = [
+      ...strong.map(renderFlagCard),
+      ...weak.slice(0, CONFIG.maxFlagged).map(renderFlagCard),
+    ].join('');
+    html += `
+      <h2 class="section-title">Flagged by papers citing this one (${total}${more ? '+' : ''})</h2>
+      <p class="section-note">Heuristic scan: these papers cite this work and use error language, or carry a notice-style title. Matched via OpenAlex full-text search — read the flagged passage to judge whether it really concerns this paper.</p>
+      <div class="update-list">${cards}</div>
+      ${more ? `<p class="section-note">+ ${more} more match${more === 1 ? '' : 'es'} not shown</p>` : ''}`;
+  }
+
+  if (!linked.length && !possible.length && !strong.length && !weak.length) {
     const rwQuery = encodeURIComponent(title);
     const gsQuery = encodeURIComponent(`"${title}" correction OR erratum`);
     html += `
       <div class="all-clear">
         <h2>No corrections found for this paper.</h2>
         <p>Checked: Crossref’s publisher-deposited update links, a title sweep of Crossref,
-        and OpenAlex’s retraction flag${retracted ? ' (retraction was flagged — see above)' : ''}.</p>
+        and OpenAlex’s retraction flag and citation scan for error language${retracted ? ' (retraction was flagged — see above)' : ''}.</p>
         <p class="caveat">Coverage is not complete: publishers don’t always deposit errata, and some
         correction notices are titled too generically to match. For high-stakes decisions also check
         the Crossmark button on the publisher’s page and the sources below.</p>
@@ -341,12 +487,14 @@ function renderAnalysis({ work, doi, linked, possible, retracted, updatesOf, sou
 /* ---------------- pipeline ---------------- */
 
 async function runTitleSearch(query) {
+  const seq = ++lookupSeq;
   currentDoi = null;
   history.replaceState(null, '', location.pathname);
   setStatus(`${spinner()} Searching Crossref for matching papers…`, { busy: true });
   el.results.innerHTML = '';
   try {
     const items = await searchPapers(query);
+    if (seq !== lookupSeq) return;
     if (!items.length) {
       setStatus(`No papers matched “${esc(query)}”. Try adding an author surname, or paste the DOI (10.xxxx/…).`, { error: true });
       return;
@@ -364,6 +512,7 @@ async function runTitleSearch(query) {
 
 async function runLookup(doi) {
   if (currentDoi === doi) { el.results.scrollIntoView({ behavior: 'smooth' }); return; }
+  const seq = ++lookupSeq;
   currentDoi = doi;
   location.hash = '/doi/' + encodeURIComponent(doi);
   el.results.innerHTML = '';
@@ -373,6 +522,7 @@ async function runLookup(doi) {
   try {
     work = await crossrefWork(doi);
   } catch (err) {
+    if (seq !== lookupSeq) return;
     if (err.status === 404) {
       setStatus(`Crossref has no record for DOI <code>${esc(doi)}</code>. It may be a typo, or registered with another agency — try <a href="${esc(doiHref(doi))}" rel="noopener" target="_blank">resolving it directly</a>.`, { error: true });
     } else {
@@ -401,12 +551,15 @@ async function runLookup(doi) {
   const jobs = await Promise.allSettled([
     linked.length ? enrichLinked(linked) : Promise.resolve(linked),
     titleSweep(doi, title, excludeDois),
-    openAlexCheck(doi),
+    citationFlagScan(doi, excludeDois),
     resolveTarget,
   ]);
 
-  const [linkedRes, sweepRes, oaRes, targetRes] = jobs;
+  const [linkedRes, sweepRes, flagRes, targetRes] = jobs;
+  if (seq !== lookupSeq) return;
   const possible = sweepRes.status === 'fulfilled' ? sweepRes.value : [];
+  const flags = flagRes.status === 'fulfilled' ? flagRes.value
+    : { retracted: null, strong: [], weak: [], more: 0 };
 
   let updatesOf = null;
   if (updatesTo) {
@@ -422,18 +575,24 @@ async function runLookup(doi) {
     work, doi,
     linked: linkedRes.status === 'fulfilled' ? linkedRes.value : linked,
     possible,
-    retracted: oaRes.status === 'fulfilled' ? oaRes.value : null,
+    flags,
+    retracted: flags.retracted,
     updatesOf,
     sources: [
       { name: 'Crossref update links', ok: linkedRes.status === 'fulfilled' },
       { name: 'Crossref title sweep', ok: sweepRes.status === 'fulfilled' },
-      { name: 'OpenAlex retraction flag', ok: oaRes.status === 'fulfilled' },
+      { name: 'OpenAlex retraction + citation scan', ok: flagRes.status === 'fulfilled' },
     ],
   });
 
   const n = (linkedRes.status === 'fulfilled' ? linkedRes.value.length : linked.length);
-  if (n || possible.length) {
-    setStatus(`Found ${n + possible.length} update${n + possible.length === 1 ? '' : 's'} for this paper${possible.length ? ` (${possible.length} unverified match${possible.length === 1 ? '' : 'es'})` : ''}.`);
+  const nFlags = flags.strong.length + flags.weak.length;
+  if (n || possible.length || nFlags) {
+    const parts = [];
+    if (n + possible.length) parts.push(`${n + possible.length} update${n + possible.length === 1 ? '' : 's'}`);
+    if (nFlags) parts.push(`${nFlags} citation flag${nFlags === 1 ? '' : 's'}`);
+    if (possible.length) parts.push(`(${possible.length} unverified match${possible.length === 1 ? '' : 'es'})`);
+    setStatus(`Found ${parts.join(', ')}.`);
   } else {
     setStatus('Search complete.');
   }

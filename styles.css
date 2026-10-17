@@ -320,6 +320,15 @@ code, .doi-line code {
 .badge-danger { background: var(--danger-bg); color: var(--danger); border-color: var(--danger-line); }
 .badge-muted { background: transparent; color: var(--ink-faint); border-color: var(--line); }
 
+.snippet {
+  margin: 8px 0 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  font-style: italic;
+}
+
 /* ---------- empty / all-clear ---------- */
 
 .all-clear {

@@ -15,7 +15,7 @@ usually *does* exist in Crossref metadata — it's just not surfaced anywhere a 
 ## How it works
 
 The site is fully static (plain HTML/CSS/JS, no backend, no API keys, no tracking) and runs
-three checks for every paper, entirely in your browser:
+four checks for every paper, entirely in your browser:
 
 1. **Crossref update links** — the paper's own Crossref record carries an `updated-by` array:
    every correction, erratum, retraction, or expression-of-concern notice the publisher formally
@@ -27,6 +27,15 @@ three checks for every paper, entirely in your browser:
    and lists them under *Possible corrections not formally linked* — clearly flagged as unverified.
 3. **OpenAlex retraction flag** — `is_retracted` on the work record (sourced from the Retraction
    Watch database). If set, a red banner is shown with a link to search the Retraction Watch entry.
+4. **Citation-flag scan** — catches the hardest case: results shown wrong by a *later paper*,
+   where no formal erratum was ever published. OpenAlex full-text search restricted to papers
+   citing the target looks for error language ("sign error", "mistake in", "contains an error")
+   and notice-titled citers, each gated on the phrase appearing in the citing paper's own
+   title/abstract and shown with the matching sentence. Motivating example: Moody & Wilczek's
+   seminal 1984 axion-force paper (Phys. Rev. D 30, 130) carries no erratum anywhere, but the
+   scan surfaces Daido & Takahashi, Phys. Lett. B 771 (2017), which documented the sign error
+   propagated through that literature. This channel is explicitly heuristic — read the
+   flagged passage to judge relevance.
 
 It also recognizes when the paper you looked up is *itself* a correction, showing what it corrects.
 
@@ -100,8 +109,9 @@ Tested end-to-end in a browser (screenshots in `gui-test-screenshots/`):
 
 | Input | Result |
 |---|---|
-| `10.1038/s41572-020-00234-1` (Tendinopathy review) | 1 linked author correction, with title/journal/date |
+| `10.1038/s41572-020-00234-1` (Tendinopathy review) | 1 linked author correction, with title/journal/date; citation scan clean |
 | `10.1016/S0140-6736(97)11096-0` (Wakefield et al.) | Retracted banner + both retraction notices (2004, 2010) |
+| `10.1103/PhysRevD.30.130` (Moody & Wilczek 1984) | No formal erratum exists; citation scan flags Daido & Takahashi (2017) with the "sign error" passage |
 | "Growth in a Time of Debt" (title search) | 8 candidates → honest "no corrections found" + manual fallbacks |
 
 ## Roadmap ideas
