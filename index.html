@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stand Corrected — see a paper's corrections, errata &amp; retractions</title>
+  <meta name="description" content="Search a paper and see every correction, erratum and retraction published after it. The updates exist in Crossref metadata but are rarely linked from the article page — this surfaces them.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A0%EF%B8%8F%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#search-input">Skip to search</a>
+
+  <header class="site-header">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" width="28" height="28" aria-hidden="true">
+        <path fill="currentColor" d="M12 2 1 21h22L12 2Zm0 4.6 7.5 13h-15L12 6.6ZM11 10v5h2v-5h-2Zm0 6.4v2h2v-2h-2Z"/>
+      </svg>
+      <h1>Stand Corrected</h1>
+    </div>
+    <p class="tagline">
+      Search a paper. See the corrections, errata and retractions published after it —
+      the ones that are almost never linked from the article page.
+    </p>
+  </header>
+
+  <main>
+    <form id="search-form" role="search" novalidate>
+      <label class="sr-only" for="search-input">Paper title, author, or DOI</label>
+      <input id="search-input" name="q" type="search"
+             placeholder="Paper title, author, or DOI — e.g. 10.1038/s41572-020-00234-1"
+             autocomplete="off" spellcheck="false">
+      <button id="search-button" type="submit">Find corrections</button>
+    </form>
+
+    <div class="examples" id="examples">
+      <span class="examples-label">Try:</span>
+      <button type="button" class="chip" data-q="10.1038/s41572-020-00234-1">a paper with an author correction</button>
+      <button type="button" class="chip" data-q="10.1016/S0140-6736(97)11096-0">a retracted paper</button>
+      <button type="button" class="chip" data-q="Tendinopathy Nature Reviews Rheumatology">a title search</button>
+    </div>
+
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+
+    <section id="results" aria-label="Search results"></section>
+  </main>
+
+  <footer class="site-footer">
+    <p>
+      Data from <a href="https://www.crossref.org/" rel="noopener">Crossref</a> (update links)
+      and <a href="https://openalex.org/" rel="noopener">OpenAlex</a> (retraction flags, via the
+      Retraction Watch database). Not affiliated with either. Corrections coverage depends on
+      what publishers deposit — always verify against the publisher’s own page.
+    </p>
+    <p>Static site: no cookies, no tracking, nothing stored. Runs entirely in your browser.</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
